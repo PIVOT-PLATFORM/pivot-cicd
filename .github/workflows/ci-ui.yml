@@ -1,0 +1,222 @@
+name: CI UI (reusable)
+
+# Reusable workflow — CI frontend Angular/Node mutualisée (EN05.17, US05.17.3).
+# Appelé par les repos -ui via un stub épinglé par SHA :
+#   jobs.ci.uses: PIVOT-PLATFORM/pivot-cicd/.github/workflows/ci-ui.yml@<SHA>
+# Les gates lourds a11y/e2e/mutation (Lighthouse, Playwright, Stryker) restent dans leurs
+# workflows dédiés (vague 5), hors de ce reusable. Secrets passés explicitement.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Version Node.js à installer.
+        type: string
+        default: '24'
+      sonar-project-key:
+        description: Clé projet SonarCloud (ex. PIVOT-PLATFORM_pivot-agilite-ui).
+        type: string
+        required: true
+      run-sonar:
+        description: Activer le job SonarCloud.
+        type: boolean
+        default: true
+      runs-on:
+        description: Runner GitHub Actions.
+        type: string
+        default: ubuntu-latest
+    secrets:
+      SONAR_TOKEN:
+        description: Token SonarCloud (requis si run-sonar=true).
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+jobs:
+  quality:
+    name: Code Quality - Angular
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node + npm
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: ESLint
+        run: npm run lint
+
+  tests:
+    name: Tests (Vitest)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node + npm
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests with coverage
+        run: npm run test:ci
+
+      - name: Upload frontend coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend-coverage
+          path: coverage/
+          if-no-files-found: warn
+          retention-days: 1
+
+  build:
+    name: Build Angular (production)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    needs: [quality, tests]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node + npm
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build -- --configuration production
+
+  sonar:
+    name: SonarCloud Analysis
+    runs-on: ${{ inputs.runs-on }}
+    needs: [tests]
+    timeout-minutes: 15
+    if: ${{ inputs.run-sonar && github.actor != 'dependabot[bot]' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Setup Node + npm
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download coverage
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: frontend-coverage
+          path: coverage/
+
+      - name: SonarCloud Scan
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passés en variables d'env pour éviter l'injection de template (branche user-controlled).
+          GH_EVENT_NAME: ${{ github.event_name }}
+          GH_PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_HEAD_REF: ${{ github.head_ref }}
+          GH_BASE_REF: ${{ github.base_ref }}
+          SONAR_PROJECT_KEY: ${{ inputs.sonar-project-key }}
+        run: |
+          PR_ARGS=""
+          if [ "${GH_EVENT_NAME}" = "pull_request" ]; then
+            PR_ARGS="-Dsonar.pullrequest.key=${GH_PR_NUMBER} \
+                     -Dsonar.pullrequest.branch=${GH_HEAD_REF} \
+                     -Dsonar.pullrequest.base=${GH_BASE_REF}"
+          fi
+          # shellcheck disable=SC2086
+          npx sonar-scanner \
+            -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
+            -Dsonar.organization=pivot-platform \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.token="${SONAR_TOKEN}" \
+            -Dsonar.sources=src \
+            -Dsonar.tests=src \
+            -Dsonar.test.inclusions=**/*.spec.ts \
+            -Dsonar.exclusions=**/*.spec.ts,dist/**,node_modules/** \
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info,coverage/frontend/lcov.info \
+            $PR_ARGS
+
+  sca:
+    name: SCA - Dependency Audit
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Trivy - Frontend (package-lock.json)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          format: sarif
+          output: trivy-frontend.sarif
+          severity: HIGH,CRITICAL
+          exit-code: 1
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
+        if: always() && hashFiles('trivy-frontend.sarif') != ''
+        with:
+          sarif_file: trivy-frontend.sarif
+          category: trivy-sca-frontend
+
+      - name: Setup Node + npm
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: npm audit (production deps)
+        run: npm audit --audit-level=high --omit=dev

@@ -1,0 +1,187 @@
+name: CI Core (reusable)
+
+# Reusable workflow — CI backend Java/Maven mutualisée (EN05.17, US05.17.2).
+# Appelé par les repos -core via un stub épinglé par SHA :
+#   jobs.ci.uses: PIVOT-PLATFORM/pivot-cicd/.github/workflows/ci-core.yml@<SHA>
+# Le stub appelant doit accorder le plafond de permissions déclaré ci-dessous
+# (contents/actions: read, security-events: write) — un reusable ne peut pas le dépasser
+# (sinon startup_failure). Secrets passés explicitement (pas de secrets: inherit).
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: Version Temurin (Java) à installer.
+        type: string
+        default: '25'
+      maven-compiler-release:
+        description: Valeur de -Dmaven.compiler.release.
+        type: string
+        default: '24'
+      sonar-project-key:
+        description: Clé projet SonarCloud (ex. PIVOT-PLATFORM_pivot-agilite-core).
+        type: string
+        required: true
+      run-sonar:
+        description: Activer le job SonarCloud.
+        type: boolean
+        default: true
+      runs-on:
+        description: Runner GitHub Actions.
+        type: string
+        default: ubuntu-latest
+    secrets:
+      SONAR_TOKEN:
+        description: Token SonarCloud (requis si run-sonar=true).
+        required: false
+
+# Plafond minimal = ce que le stub appelant accorde. Ne jamais élargir (read-all → startup_failure).
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+jobs:
+  quality-backend:
+    name: Code Quality - Java
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Java + Maven
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+          cache: maven
+
+      - name: Compile + Checkstyle + SpotBugs
+        env:
+          # Résout fr.pivot:pivot-core-starter (GitHub Packages) via .mvn/settings.xml du repo appelant.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: mvn --no-transfer-progress compile checkstyle:check spotbugs:check -Dmaven.compiler.release=${{ inputs.maven-compiler-release }}
+
+  tests-backend:
+    name: Tests Backend (TU + TI)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    services:
+      # PostgreSQL fourni par Testcontainers. Redis provisionné pour les tests temps réel.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Java + Maven
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+          cache: maven
+
+      - name: Run tests with coverage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPRING_REDIS_HOST: localhost
+          SPRING_REDIS_PORT: 6379
+        run: mvn --no-transfer-progress verify -Pcoverage -Dmaven.compiler.release=${{ inputs.maven-compiler-release }}
+
+      - name: Upload backend build (classes + coverage)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: backend-build
+          path: |
+            target/classes/
+            target/test-classes/
+            target/site/jacoco/jacoco.xml
+          retention-days: 1
+
+  sonar:
+    name: SonarCloud Analysis
+    runs-on: ${{ inputs.runs-on }}
+    needs: [tests-backend]
+    timeout-minutes: 15
+    if: ${{ inputs.run-sonar && github.actor != 'dependabot[bot]' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Setup Java + Maven
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+          cache: maven
+
+      - name: Download backend build (classes + coverage)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: backend-build
+          path: target/
+
+      - name: SonarCloud Scan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          mvn --no-transfer-progress sonar:sonar \
+            -Dmaven.compiler.release=${{ inputs.maven-compiler-release }} \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.organization=pivot-platform \
+            -Dsonar.projectKey=${{ inputs.sonar-project-key }} \
+            -Dsonar.token="${SONAR_TOKEN}"
+
+  sca:
+    name: SCA - Dependency Audit
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Trivy - Maven pom.xml
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          format: sarif
+          output: trivy-backend.sarif
+          severity: HIGH,CRITICAL
+          exit-code: 1
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        if: always() && hashFiles('trivy-backend.sarif') != ''
+        with:
+          sarif_file: trivy-backend.sarif
+          category: trivy-sca-backend

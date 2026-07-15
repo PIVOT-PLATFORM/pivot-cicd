@@ -1,0 +1,8 @@
+# Binaire actionlint téléchargé par la CI interne
+/actionlint
+/download-actionlint.bash
+
+# Rapports générés
+*.sarif
+plumber-results.json
+plumber-pbom.cdx.json

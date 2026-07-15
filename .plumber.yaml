@@ -1,0 +1,63 @@
+version: "2.0"
+
+github:
+  controls:
+
+    # --- Supply chain : SHA pinning ---
+    actionsMustBePinnedByCommitSha:
+      enabled: true
+      trustedOwners: []
+
+    actionsMustNotBeArchived:
+      enabled: true
+
+    actionsMustNotCarryKnownCVEs:
+      enabled: true
+
+    githubActionMustComeFromAuthorizedSources:
+      enabled: true
+      trustGithubOfficialActions: true
+      trustSameOrgActions: true
+      trustedGithubActions:
+        - ossf/scorecard-action
+        - getplumber/plumber
+        # Requis par les reusables ci-core.yml / ci-ui.yml (job SCA Trivy).
+        - aquasecurity/trivy-action
+
+    # --- Debug trace interdit ---
+    pipelineMustNotEnableDebugTrace:
+      enabled: true
+      forbiddenVariables:
+        - ACTIONS_STEP_DEBUG
+        - ACTIONS_RUNNER_DEBUG
+
+    # --- Triggers dangereux ---
+    workflowMustNotUseDangerousTriggers:
+      enabled: true
+
+    # --- Permissions explicites obligatoires ---
+    workflowsMustDeclarePermissions:
+      enabled: true
+
+    # --- Pas de write-all ---
+    workflowMustNotGrantPermissionsWriteAll:
+      enabled: true
+
+    # --- Jobs securite non affaiblissables ---
+    securityJobsMustNotBeWeakened:
+      enabled: true
+      securityJobPatterns:
+        - "*scorecard*"
+        - "*plumber*"
+        - "*security*"
+        - "*scan*"
+        - "*sca*"
+
+    # --- Protection de branche ---
+    branchMustBeProtected:
+      enabled: true
+      defaultMustBeProtected: true
+      namePatterns:
+        - main
+      allowForcePush: false
+      codeOwnerApprovalRequired: true
